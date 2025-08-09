@@ -1,13 +1,273 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Калькулятор авто из Кореи</title>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
-  </body>
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Калькулятор авто из Кореи</title>
+  <style>
+    body{font-family:system-ui,sans-serif;background:#f5f5f5;margin:0;color:#222}
+    .container{max-width:1100px;margin:0 auto;padding:1rem}
+    h1{text-align:center;margin-bottom:1rem}
+    .grid{display:flex;flex-direction:column;gap:1rem}
+    @media(min-width:900px){.grid{flex-direction:row}}
+    .card{background:#fff;padding:1rem;border-radius:8px;box-shadow:0 2px 6px rgba(0,0,0,.1)}
+    label{display:block;margin-bottom:.5rem}
+    input,select,button{font:inherit;padding:.4rem;border:1px solid #ccc;border-radius:4px}
+    input,select{width:100%;box-sizing:border-box;margin-top:.25rem}
+    fieldset{border:1px solid #ccc;padding:.5rem;margin-bottom:1rem}
+    legend{padding:0 .5rem}
+    .form-buttons{margin-top:1rem;display:flex;flex-wrap:wrap;gap:.5rem}
+    .form-buttons button{flex:1 1 45%}
+    #result h2{margin-top:0}
+    #details{list-style:none;padding:0;margin:0}
+    #details li{display:flex;justify-content:space-between;margin:.25rem 0}
+    .hidden{display:none}
+    input.fallback{border-color:#e67e22;background:#fef6e4}
+    small.error{color:#c0392b;font-size:.8rem}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Калькулятор авто из Кореи</h1>
+    <div class="grid">
+      <form id="calc-form" class="card" novalidate>
+        <label>Цена на Encar (KRW)
+          <input type="number" id="priceKrw" required min="0" step="1" />
+          <small class="error" id="priceKrwErr"></small>
+        </label>
+        <label>Год выпуска
+          <select id="year"></select>
+        </label>
+        <label>Тип двигателя
+          <select id="engineType">
+            <option value="petrol">Бензин</option>
+            <option value="diesel">Дизель</option>
+            <option value="hybrid">Гибрид</option>
+            <option value="ev">Электро</option>
+          </select>
+        </label>
+        <label id="ccWrap">Объём двигателя (см³)
+          <input type="number" id="cc" min="0" step="1" />
+        </label>
+        <label>Мощность (л.с.)
+          <input type="number" id="hp" min="0" step="1" />
+        </label>
+        <fieldset>
+          <legend>Курсы</legend>
+          <label>KRW → USD
+            <input type="number" id="rateKrwUsd" step="0.00001" min="0" />
+          </label>
+          <label>USD → RUB
+            <input type="number" id="rateUsdRub" step="0.01" min="0" />
+          </label>
+          <button type="button" id="updateRates">Обновить курсы</button>
+          <small class="error" id="rateErr"></small>
+        </fieldset>
+        <label>Фрахт Корея→Владивосток (USD)
+          <input type="number" id="freightUsd" step="0.01" min="0" value="1440" />
+        </label>
+        <label>Брокер (RUB)
+          <input type="number" id="brokerRub" step="1" min="0" value="110000" />
+        </label>
+        <label>Автовоз (RUB)
+          <input type="number" id="truckRub" step="1" min="0" value="220000" />
+        </label>
+        <label>Ссылка на Encar
+          <input type="url" id="link" />
+        </label>
+        <div class="form-buttons">
+          <button type="button" id="calcBtn">Посчитать</button>
+          <button type="button" id="copyUsd">Скопировать USD для alta.ru</button>
+          <button type="button" id="saveBtn">Сохранить</button>
+          <button type="button" id="shareBtn">Поделиться расчётом</button>
+          <button type="button" id="resetBtn">Сброс</button>
+        </div>
+      </form>
+      <div id="result" class="card">
+        <h2>ИТОГ (RUB): <span id="total">0</span></h2>
+        <ul id="details"></ul>
+        <div id="shareOutput" class="hidden">
+          <input type="text" id="shareLink" readonly />
+          <button type="button" id="copyShare">Копировать</button>
+        </div>
+      </div>
+    </div>
+  </div>
+  <script>
+  // --- utils ---
+  function fmtMoney(n, curr){
+    const opts={style:'currency',currency:curr,maximumFractionDigits:(curr==='USD'?2:0)};
+    return new Intl.NumberFormat('ru-RU',opts).format(n);
+  }
+  function debounce(fn,ms){let t;return(...a)=>{clearTimeout(t);t=setTimeout(()=>fn.apply(this,a),ms);}};
+  
+  async function fetchKrwUsd(){
+    try{const r=await fetch('https://api.exchangerate.host/latest?base=KRW&symbols=USD');
+      if(!r.ok) throw 0;const d=await r.json();return{rate:+d.rates.USD};
+    }catch(e){return{rate:0.00074,error:true};}}
+  async function fetchUsdRub(){
+    try{const r=await fetch('https://api.exchangerate.host/latest?base=USD&symbols=RUB');
+      if(!r.ok) throw 0;const d=await r.json();return{rate:+d.rates.RUB};
+    }catch(e){return{rate:90,error:true};}}
+
+  function calcPriceUsd(krw,krwUsd){return krw*krwUsd;}
+  function calcRub(usd,usdRub){return usd*usdRub;}
+
+  function calcCustoms({year,engineType,displacementCc,powerHp,carUsd,usdToRub}){
+    const age=new Date().getFullYear()-year;
+    const carRub=carUsd*usdToRub;
+    const cc=displacementCc||0;const EUR_TO_USD=1.1;
+    const limits=[1000,1500,1800,2300,3000,Infinity];
+    const young=[2.5,3.5,5.5,7.5,15,20];
+    const mid=[1.5,1.7,2.5,2.7,3,3.6];
+    const old=[3,3.2,3.5,5,5.7,7.5];
+    let duty=0;
+    if(engineType!=='ev'){
+      const rateArr=age<=3?young:age<=5?mid:old;
+      let rate=0;for(let i=0;i<limits.length;i++){if(cc<=limits[i]){rate=rateArr[i];break;}}
+      duty=cc*rate*EUR_TO_USD*usdToRub;
+      if(age<=3){duty=Math.max(duty,0.48*carRub);} // 48% rule
+    }
+    let excise=0; // упрощение: акциз отсутствует
+    let util=engineType==='ev'?3800:5200;
+    if(powerHp) util*=1+powerHp/1000; // небольшой коэффициент
+    const vatBase=carRub+duty+excise+util;
+    const vat=0.2*vatBase;
+    const total=Math.round(duty+excise+util+vat);
+    return{totalRub:total,breakdown:{'Пошлина':Math.round(duty),'Акциз':Math.round(excise),'Утильсбор':Math.round(util),'НДС':Math.round(vat)}};
+  }
+
+  function calcAll(input){
+    const priceUsd=calcPriceUsd(input.priceKrw,input.rateKrwUsd);
+    const carRub=calcRub(priceUsd,input.rateUsdRub);
+    const freightRub=calcRub(input.freightUsd,input.rateUsdRub);
+    const customs=calcCustoms({year:input.year,engineType:input.engineType,displacementCc:input.cc,powerHp:input.hp,carUsd:priceUsd,usdToRub:input.rateUsdRub});
+    const totalRub=Math.round(carRub+freightRub+customs.totalRub+input.brokerRub+input.truckRub);
+    return{priceUsd,carRub,freightRub,customs,totalRub};
+  }
+
+  // --- state helpers ---
+  const form=document.getElementById('calc-form');
+  const els={
+    priceKrw:document.getElementById('priceKrw'),year:document.getElementById('year'),engineType:document.getElementById('engineType'),cc:document.getElementById('cc'),hp:document.getElementById('hp'),
+    rateKrwUsd:document.getElementById('rateKrwUsd'),rateUsdRub:document.getElementById('rateUsdRub'),freightUsd:document.getElementById('freightUsd'),brokerRub:document.getElementById('brokerRub'),truckRub:document.getElementById('truckRub'),link:document.getElementById('link')};
+  const totalEl=document.getElementById('total');
+  const detailsEl=document.getElementById('details');
+  const shareOutput=document.getElementById('shareOutput');
+  const shareLink=document.getElementById('shareLink');
+  const rateErr=document.getElementById('rateErr');
+  const ccWrap=document.getElementById('ccWrap');
+
+  function getData(){
+    return{
+      priceKrw:+els.priceKrw.value||0,
+      year:+els.year.value||new Date().getFullYear(),
+      engineType:els.engineType.value,
+      cc:+els.cc.value||0,
+      hp:+els.hp.value||0,
+      rateKrwUsd:+els.rateKrwUsd.value||0,
+      rateUsdRub:+els.rateUsdRub.value||0,
+      freightUsd:+els.freightUsd.value||0,
+      brokerRub:+els.brokerRub.value||0,
+      truckRub:+els.truckRub.value||0,
+      link:els.link.value||''
+    };
+  }
+  function setData(d){
+    for(const k in d){if(els[k]!==undefined && d[k]!==undefined) els[k].value=d[k];}
+  }
+  const save=()=>localStorage.setItem('calcData',JSON.stringify(getData()));
+  const saveDeb=debounce(save,300);
+
+  form.addEventListener('input',()=>{saveDeb();});
+
+  function load(){
+    const qs=new URLSearchParams(location.search);
+    const saved=JSON.parse(localStorage.getItem('calcData')||'{}');
+    setData(saved);
+    qs.forEach((v,k)=>{if(els[k]) els[k].value=v;});
+  }
+
+  function updateCc(){
+    if(els.engineType.value==='ev'){ccWrap.style.display='none';els.cc.value='';}
+    else ccWrap.style.display='block';
+  }
+
+  els.engineType.addEventListener('change',()=>{updateCc();});
+
+  async function loadRates(){
+    rateErr.textContent='';
+    const kr=await fetchKrwUsd();
+    els.rateKrwUsd.value=kr.rate.toFixed(5);
+    els.rateKrwUsd.classList.toggle('fallback',!!kr.error);
+    const us=await fetchUsdRub();
+    els.rateUsdRub.value=us.rate.toFixed(2);
+    els.rateUsdRub.classList.toggle('fallback',!!us.error);
+    if(kr.error||us.error){rateErr.textContent='Не удалось получить курсы, используются значения по умолчанию.';}
+  }
+
+  document.getElementById('updateRates').addEventListener('click',()=>{loadRates();});
+
+  let lastPriceUsd=0;
+  function calculate(){
+    if(!form.reportValidity()) return;
+    const input=getData();
+    const res=calcAll(input);
+    lastPriceUsd=res.priceUsd;
+    totalEl.textContent=fmtMoney(res.totalRub,'RUB');
+    const items=[
+      ['Цена Encar (KRW)',fmtMoney(input.priceKrw,'KRW')],
+      ['Курс KRW→USD',input.rateKrwUsd.toFixed(5)],
+      ['Цена авто (USD)',fmtMoney(res.priceUsd,'USD')],
+      ['Курс USD→RUB',input.rateUsdRub.toFixed(2)],
+      ['Цена авто (RUB)',fmtMoney(res.carRub,'RUB')],
+      ['Фрахт (USD→RUB)',fmtMoney(res.freightRub,'RUB')],
+      ['Пошлина',fmtMoney(res.customs.breakdown['Пошлина'],'RUB')],
+      ['Акциз',fmtMoney(res.customs.breakdown['Акциз'],'RUB')],
+      ['Утильсбор',fmtMoney(res.customs.breakdown['Утильсбор'],'RUB')],
+      ['НДС',fmtMoney(res.customs.breakdown['НДС'],'RUB')],
+      ['Брокер',fmtMoney(input.brokerRub,'RUB')],
+      ['Автовоз',fmtMoney(input.truckRub,'RUB')],
+      ['ИТОГ',fmtMoney(res.totalRub,'RUB')]
+    ];
+    detailsEl.innerHTML=items.map(([k,v])=>`<li><span>${k}</span><span>${v}</span></li>`).join('');
+  }
+
+  document.getElementById('calcBtn').addEventListener('click',calculate);
+
+  document.getElementById('copyUsd').addEventListener('click',()=>{
+    navigator.clipboard.writeText(lastPriceUsd.toFixed(2));
+  });
+
+  document.getElementById('saveBtn').addEventListener('click',()=>{save();alert('Сохранено');});
+
+  document.getElementById('shareBtn').addEventListener('click',()=>{
+    const data=getData();
+    const params=new URLSearchParams(data).toString();
+    const url=location.origin+location.pathname+'?'+params;
+    shareLink.value=url;
+    shareOutput.classList.remove('hidden');
+  });
+  document.getElementById('copyShare').addEventListener('click',()=>{navigator.clipboard.writeText(shareLink.value);});
+
+  document.getElementById('resetBtn').addEventListener('click',()=>{
+    form.reset();localStorage.removeItem('calcData');shareOutput.classList.add('hidden');calculate();
+  });
+
+  function initYears(){
+    const ySelect=els.year;const now=new Date().getFullYear();
+    for(let y=2005;y<=now;y++){const opt=document.createElement('option');opt.value=y;opt.textContent=y;ySelect.appendChild(opt);}ySelect.value=now;
+  }
+
+  function init(){
+    initYears();
+    load();
+    updateCc();
+    loadRates();
+    calculate();
+  }
+  document.addEventListener('DOMContentLoaded',init);
+  </script>
+</body>
 </html>
+

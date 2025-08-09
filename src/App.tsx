@@ -53,18 +53,18 @@ export default function App() {
   const handleCalc = async () => {
     setError(null)
     try {
-      const encarUrl = `/api/encar?url=${encodeURIComponent(state.url)}`
-      const [encarRes, krwRate, usdRate] = await Promise.all([
-        fetch(encarUrl).then((r) => r.json()),
+      const apiUrl = `/api/encar?url=${encodeURIComponent(state.url)}`
+      const [resp, krwUsd, usdRub] = await Promise.all([
+        fetch(apiUrl),
         fetchKrwToUsd(),
         fetchUsdToRub(),
       ])
-      if (!encarRes.ok) throw new Error(encarRes.error || 'parse failed')
-      const data: EncarData = encarRes.data
-      const priceKrw = data.priceKrw
-      const krwUsd = krwRate
-      const usdRub = usdRate
-      const priceUsd = calcPriceUsd(priceKrw, krwUsd)
+      const raw = await resp.text()
+      console.log('API status:', resp.status, 'raw:', raw.slice(0, 200))
+      const enc = JSON.parse(raw)
+      if (!enc.ok || !enc.data?.priceKrw) throw new Error(enc.error || 'No price')
+      const data: EncarData = enc.data
+      const priceUsd = calcPriceUsd(data.priceKrw, krwUsd)
       const customsRes = calcCustoms({
         year: data.year,
         engineType: data.engineType,

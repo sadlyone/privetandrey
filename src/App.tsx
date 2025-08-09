@@ -1,141 +1,222 @@
 import { useEffect, useState } from 'react'
-import { calcTotal, Inputs } from './calc'
-import { SourcePrice } from './components/SourcePrice'
-import { RatesPanel } from './components/RatesPanel'
-import { FixedCosts } from './components/FixedCosts'
-import { CustomsPanel } from './components/CustomsPanel'
-import { ResultBreakdown } from './components/ResultBreakdown'
-import { fetchKrwToUsdt, fetchUsdToRub } from './rates'
+import { calcPriceUsd, calcRub, calcTotal } from './lib/calc'
+import { calcCustoms, type CustomsOutput, type EngineType } from './lib/customs'
+import { fetchKrwToUsd, fetchUsdToRub } from './lib/rates'
 
-type Memo = {
-  age: string
-  engine: string
-  volume: string
-  power: string
-  hybrid: string
-  mode: string
+interface EncarData {
+  priceKrw: number
+  year: number
+  engineType: EngineType
+  displacementCc?: number
+  powerHp?: number
+  title?: string
+  img?: string
 }
 
-interface State extends Inputs {
-  memo: Memo
+interface State {
+  url: string
+  data?: EncarData
+  krwUsd: number
+  usdRub: number
+  freightUsd: number
+  brokerRub: number
+  truckRub: number
 }
 
-const defaultState: State = {
-  priceKrw: 15_000_000,
-  rateKrwToUsdt: 0.00074,
-  rateUsdtToRub: 90,
+const defaults: State = {
+  url: '',
+  krwUsd: 0.00074,
+  usdRub: 90,
   freightUsd: 1440,
-  customsRub: 0,
-  brokerRub: 110_000,
-  truckRub: 220_000,
-  memo: { age: '', engine: '', volume: '', power: '', hybrid: '', mode: '' },
+  brokerRub: 110000,
+  truckRub: 220000,
 }
 
 export default function App() {
   const [state, setState] = useState<State>(() => {
-    const saved = localStorage.getItem('calc-state')
-    const fromStorage = saved ? JSON.parse(saved) : defaultState
-    const params = new URLSearchParams(window.location.search)
+    const fromLS = localStorage.getItem('calc-state')
+    if (fromLS) return { ...defaults, ...JSON.parse(fromLS) }
+    const params = new URLSearchParams(location.search)
+    const s: any = { ...defaults }
     params.forEach((v, k) => {
-      if (k in fromStorage) (fromStorage as any)[k] = Number(v)
+      if (k in s) s[k] = typeof (s as any)[k] === 'number' ? Number(v) : v
     })
-    return fromStorage
+    return s
   })
-  const [rubDecimals, setRubDecimals] = useState(0)
-  const [krwError, setKrwError] = useState(false)
-  const [rubError, setRubError] = useState(false)
-
-  const breakdown = calcTotal(state)
+  const [customs, setCustoms] = useState<CustomsOutput | null>(null)
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     localStorage.setItem('calc-state', JSON.stringify(state))
   }, [state])
 
-  const copyUsd = () => {
-    navigator.clipboard.writeText(breakdown.priceUsd.toFixed(2))
-  }
-
-  const refreshKrw = async () => {
+  const handleCalc = async () => {
+    setError(null)
     try {
-      const rate = await fetchKrwToUsdt()
-      setState((s) => ({ ...s, rateKrwToUsdt: rate }))
-      setKrwError(false)
-    } catch {
-      setKrwError(true)
-      alert('Не удалось обновить курс KRW→USDT')
+      const encarUrl = `/api/encar?url=${encodeURIComponent(state.url)}`
+      const [encarRes, krwRate, usdRate] = await Promise.all([
+        fetch(encarUrl).then((r) => r.json()),
+        fetchKrwToUsd(),
+        fetchUsdToRub(),
+      ])
+      if (!encarRes.ok) throw new Error(encarRes.error || 'parse failed')
+      const data: EncarData = encarRes.data
+      const priceKrw = data.priceKrw
+      const krwUsd = krwRate
+      const usdRub = usdRate
+      const priceUsd = calcPriceUsd(priceKrw, krwUsd)
+      const customsRes = calcCustoms({
+        year: data.year,
+        engineType: data.engineType,
+        displacementCc: data.displacementCc,
+        powerHp: data.powerHp,
+        carUsd: priceUsd,
+        usdToRub: usdRub,
+      })
+      setState((s) => ({
+        ...s,
+        data,
+        krwUsd,
+        usdRub,
+      }))
+      setCustoms(customsRes)
+    } catch (e: any) {
+      setError(e.message || 'Ошибка')
     }
   }
 
-  const refreshRub = async () => {
-    try {
-      const rate = await fetchUsdToRub()
-      setState((s) => ({ ...s, rateUsdtToRub: rate }))
-      setRubError(false)
-    } catch {
-      setRubError(true)
-      alert('Не удалось обновить курс USDT→RUB')
-    }
-  }
+  const priceUsd = state.data ? calcPriceUsd(state.data.priceKrw, state.krwUsd) : 0
+  const carRub = calcRub(priceUsd, state.usdRub)
+  const freightRub = calcRub(state.freightUsd, state.usdRub)
+  const customsRub = customs?.totalRub ?? 0
+  const total = calcTotal({
+    priceKrw: state.data?.priceKrw || 0,
+    krwUsd: state.krwUsd,
+    usdRub: state.usdRub,
+    freightUsd: state.freightUsd,
+    customsRub,
+    brokerRub: state.brokerRub,
+    truckRub: state.truckRub,
+  })
 
-  const reset = () => setState(defaultState)
-
-  const save = () => localStorage.setItem('calc-state', JSON.stringify(state))
-
+  const copyUsd = () => navigator.clipboard.writeText(priceUsd.toFixed(2))
   const share = () => {
     const params = new URLSearchParams()
-    ;['priceKrw', 'rateKrwToUsdt', 'rateUsdtToRub', 'freightUsd', 'customsRub', 'brokerRub', 'truckRub'].forEach((k) =>
-      params.set(k, String((state as any)[k])),
-    )
+    Object.entries(state).forEach(([k, v]) => params.set(k, String(v)))
     navigator.clipboard.writeText(window.location.origin + '?' + params.toString())
   }
 
   return (
-    <div className="max-w-4xl mx-auto p-4 space-y-4">
-      <SourcePrice
-        priceKrw={state.priceKrw}
-        priceUsd={breakdown.priceUsd}
-        onChange={(v) => setState({ ...state, priceKrw: v })}
-        onCopyUsd={copyUsd}
-      />
-      <RatesPanel
-        krwToUsdt={state.rateKrwToUsdt}
-        usdtToRub={state.rateUsdtToRub}
-        onKrwChange={(v) => setState({ ...state, rateKrwToUsdt: v })}
-        onRubChange={(v) => setState({ ...state, rateUsdtToRub: v })}
-        onRefreshKrw={refreshKrw}
-        onRefreshRub={refreshRub}
-        krwError={krwError}
-        rubError={rubError}
-      />
-      <FixedCosts
-        freightUsd={state.freightUsd}
-        brokerRub={state.brokerRub}
-        truckRub={state.truckRub}
-        onFreightChange={(v) => setState({ ...state, freightUsd: v })}
-        onBrokerChange={(v) => setState({ ...state, brokerRub: v })}
-        onTruckChange={(v) => setState({ ...state, truckRub: v })}
-        rateUsdtToRub={state.rateUsdtToRub}
-      />
-      <CustomsPanel
-        customsRub={state.customsRub}
-        onCustomsChange={(v) => setState({ ...state, customsRub: v })}
-        priceUsd={breakdown.priceUsd}
-        onCopyUsd={copyUsd}
-        memo={state.memo}
-        onMemoChange={(f, val) => setState({ ...state, memo: { ...state.memo, [f]: val } })}
-      />
-      <ResultBreakdown
-        inputs={state}
-        breakdown={breakdown}
-        rubDecimals={rubDecimals}
-        setRubDecimals={setRubDecimals}
-        onReset={reset}
-        onSave={save}
-        onShare={share}
-      />
-      <div className="text-center text-sm text-gray-500">
-        Скопируйте USD-цену и откройте alta.ru
+    <div className="max-w-2xl mx-auto p-4 space-y-4">
+      <div className="flex gap-2">
+        <input
+          className="flex-1 border p-2 rounded"
+          placeholder="Encar URL"
+          value={state.url}
+          onChange={(e) => setState({ ...state, url: e.target.value })}
+        />
+        <button className="bg-blue-600 text-white px-4 py-2 rounded" onClick={handleCalc}>
+          Посчитать
+        </button>
       </div>
+      {error && <div className="text-red-600 text-sm">{error}</div>}
+      {state.data && (
+        <div className="border p-4 rounded space-y-2">
+          {state.data.img && <img src={state.data.img} alt="car" className="w-full" />}
+          <div className="font-bold">{state.data.title}</div>
+          <div>
+            {state.data.year}, {state.data.engineType}
+            {state.data.displacementCc && `, ${state.data.displacementCc}cc`}
+            {state.data.powerHp && `, ${state.data.powerHp}hp`}
+          </div>
+          <div>Цена: {state.data.priceKrw.toLocaleString()} KRW</div>
+        </div>
+      )}
+      <div className="grid grid-cols-1 gap-2">
+        <label>
+          Курс KRW→USD
+          <input
+            type="number"
+            className="w-full border p-1 rounded"
+            value={state.krwUsd}
+            onChange={(e) => setState({ ...state, krwUsd: Number(e.target.value) })}
+          />
+        </label>
+        <label>
+          Курс USD→RUB
+          <input
+            type="number"
+            className="w-full border p-1 rounded"
+            value={state.usdRub}
+            onChange={(e) => setState({ ...state, usdRub: Number(e.target.value) })}
+          />
+        </label>
+        <label>
+          Фрахт USD
+          <input
+            type="number"
+            className="w-full border p-1 rounded"
+            value={state.freightUsd}
+            onChange={(e) => setState({ ...state, freightUsd: Number(e.target.value) })}
+          />
+        </label>
+        <label>
+          Брокер RUB
+          <input
+            type="number"
+            className="w-full border p-1 rounded"
+            value={state.brokerRub}
+            onChange={(e) => setState({ ...state, brokerRub: Number(e.target.value) })}
+          />
+        </label>
+        <label>
+          Автовоз RUB
+          <input
+            type="number"
+            className="w-full border p-1 rounded"
+            value={state.truckRub}
+            onChange={(e) => setState({ ...state, truckRub: Number(e.target.value) })}
+          />
+        </label>
+      </div>
+      {state.data && (
+        <div className="space-y-1 border p-4 rounded">
+          <div>Цена авто USD: {priceUsd.toFixed(2)}</div>
+          <div>Цена авто RUB: {carRub.toFixed(0)}</div>
+          <div>Фрахт RUB: {freightRub.toFixed(0)}</div>
+          {customs && (
+            <div>
+              Таможня RUB: {customs.totalRub}
+              <ul className="pl-4 list-disc">
+                {Object.entries(customs.breakdown).map(([k, v]) => (
+                  <li key={k}>
+                    {k}: {v.toFixed(0)}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+          <div>Брокер RUB: {state.brokerRub}</div>
+          <div>Автовоз RUB: {state.truckRub}</div>
+          <div className="font-bold">ИТОГ RUB: {total.totalRub}</div>
+        </div>
+      )}
+      {state.data && (
+        <div className="flex gap-2">
+          <button className="px-4 py-2 bg-gray-200 rounded" onClick={copyUsd}>
+            Скопировать USD для alta.ru
+          </button>
+          <button className="px-4 py-2 bg-gray-200 rounded" onClick={share}>
+            Поделиться расчётом
+          </button>
+          <button
+            className="px-4 py-2 bg-gray-200 rounded"
+            onClick={() => localStorage.setItem('calc-state', JSON.stringify(state))}
+          >
+            Сохранить
+          </button>
+        </div>
+      )}
     </div>
   )
 }
